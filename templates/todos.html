@@ -1,0 +1,35 @@
+{% extends "index.html" %}
+
+{% block content %}
+
+        <br>
+
+        <form name="create-form"  hx-post="/todos" hx-encoding="multipart/form-data" hx-target="#app-body" hx-swap="innerHTML">
+            <input type="text" name="content" id="content">
+            <input type="checkbox" name="done" id="done" checked="false">
+            <button type="submit">Create Todo!</button>
+        </form>
+
+        <br>
+
+        <table class="table table-bordered table-hover">
+            <tbody>
+                {% for todo in todos %}
+                <tr class="text-center align-middle">
+                    <td> {{todo.content}} {% if todo.done %} [X] {% else %} [  ] {% endif %}</td>
+                    <td> 
+                        <form name="delete-form{{todo.id}}" hx-delete="todos/{{todo.id}}" hx-target="#app-body" hx-swap="innerHTML">
+                            <button type="submit" ><i class="fa fa-times" aria-hidden="true"></i></button>
+                        </form>
+                    </td>
+                    <td>
+                        <form name="update-form{{todo.id}}" hx-put="todos/{{todo.id}}" hx-target="#app-body" hx-swap="innerHTML">
+                            <button type="submit"><i class="fa fa-check" aria-hidden="true"></i></button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+  
+{% endblock %}

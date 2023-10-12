@@ -1,19 +1,32 @@
+use axum::response::Html;
 use sqlx::*;
 use axum::{
-    extract::State, extract::Path,
+    extract::State, extract::Path, extract::Multipart,
     response::Response, response::Result, response::IntoResponse,
     http::StatusCode,
     routing::get,
-    Router, Json
+    Router, Json,
 };
 use serde::*;
 use serde_json::*;
 use std::net::SocketAddr;
 use std::env;
+use askama::Template;
+
+#[derive(Template)]
+#[template(path="index.html")]
+struct Index {}
+
+#[derive(Template)]
+#[template(path="todos.html")]
+struct Todos {
+    todos: Vec<Todo>
+}
 
 pub enum ApiError {
     DatabaseError(sqlx::Error),
     PayloadError(anyhow::Error),
+    HtmlError(askama::Error)
 }
 
 impl From<sqlx::Error> for ApiError {
@@ -28,13 +41,21 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
+impl From<askama::Error> for ApiError {
+    fn from(e: askama::Error) -> Self {
+        ApiError::HtmlError(e)
+    }
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
             ApiError::DatabaseError(_) => 
                 (StatusCode::INTERNAL_SERVER_ERROR, "An unexpected exception has occured").into_response(),
             ApiError::PayloadError(_) =>
-                (StatusCode::INTERNAL_SERVER_ERROR, "An unexpected exception has occured").into_response()
+                (StatusCode::INTERNAL_SERVER_ERROR, "An unexpected exception has occured").into_response(),
+            ApiError::HtmlError(_) =>
+                (StatusCode::INTERNAL_SERVER_ERROR, "An unexpected exception has occured").into_response()  
         }
     }
 }
@@ -64,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
 
     // setup app router with pool as state
     let app = Router::new()
+        .route("/", get(handle_idx))
         .route("/todos", get(read_todos)
             .post(create_todo))
         .route("/todos/:id", get(read_todo)
@@ -81,15 +103,38 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn create_todo(State(pool): State<PgPool>, Json(payload): Json<CreateTodo>) -> Result<StatusCode, ApiError> {
-    if payload.content.is_empty() {
+async fn handle_idx() -> impl IntoResponse {
+    let idx = Index{};
+    let reply_html = idx.render().unwrap();
+
+    (StatusCode::OK, Html(reply_html))
+}
+
+async fn create_todo(State(pool): State<PgPool>, mut req: Multipart) -> Result<Html<String>, ApiError> {
+
+    let mut i = 0;
+    let mut todo: CreateTodo = CreateTodo{ content: String::new(), done: false };
+
+    while let Some(field) = req.next_field().await.unwrap() {
+        if i == 0 {
+            todo.content = field.text().await.unwrap();
+        }
+        i += 1;
+    }
+
+    if i == 2 { todo.done = true }
+
+    if todo.content.is_empty() {
         return Err(ApiError::PayloadError(anyhow::anyhow!("Won't use empty payloads")))
     }
 
-    // use payload to create todo
-    query!("INSERT INTO todos (content, done) VALUES($1, $2)", payload.content, payload.done).execute(&pool).await?;    
+    query!("INSERT INTO todos (content, done) VALUES($1, $2)", todo.content, todo.done).execute(&pool).await?;
 
-    Ok(StatusCode::CREATED)
+    let todos: Vec<Todo> = query_as!(Todo, "SELECT * FROM todos ORDER BY id").fetch_all(&pool).await?;
+    let temp = Todos{ todos: todos };
+    let reply = temp.render().unwrap();
+
+    Ok(Html(reply))
 }
 
 async fn read_todo(Path(id): Path<i32>, State(pool): State<PgPool>) -> Result<Json<serde_json::Value>, ApiError> {
@@ -100,36 +145,42 @@ async fn read_todo(Path(id): Path<i32>, State(pool): State<PgPool>) -> Result<Js
     Ok(Json(json!(&todo)))
 }
 
-async fn read_todos(State(pool): State<PgPool>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn read_todos(State(pool): State<PgPool>) -> Result<Html<String>, ApiError> {
     // query todos from db
-    let todos: Vec<Todo> = query_as!(Todo, "SELECT * FROM todos").fetch_all(&pool).await?;
+    let todos: Vec<Todo> = query_as!(Todo, "SELECT * FROM todos ORDER BY id").fetch_all(&pool).await?;
+    let temp = Todos{ todos: todos };
+    let reply = temp.render().unwrap();
 
+    Ok(Html(reply))
     // send back result
-    Ok(Json(json!(&todos)))
+    //Ok(Json(json!(&todos)))
 }
 
-async fn update_todo(Path(id): Path<i32>, State(pool): State<PgPool>, Json(payload): Json<CreateTodo>) -> Result<StatusCode, ApiError> {
-    if payload.content.is_empty() {
-        return Err(ApiError::PayloadError(anyhow::anyhow!("Won't use empty todo")))
-    }
-    
+async fn update_todo(Path(id): Path<i32>, State(pool): State<PgPool>) -> Result<Html<String>, ApiError> {
+
     // get todo based on id
     let mut todo: Todo = query_as!(Todo, "SELECT * FROM todos WHERE id = $1", id).fetch_one(&pool).await?;
 
-    // transfer payload contents over
-    todo.content = payload.content;
-    todo.done = payload.done;
+    // invert doneness of todo
+    todo.done = !todo.done;
 
     // update todo
-    query!("UPDATE todos SET content = $1, done = $2 WHERE id = $3", todo.content, todo.done, todo.id).execute(&pool).await?;    
+    query!("UPDATE todos SET done = $1 WHERE id = $2", todo.done, todo.id).execute(&pool).await?;    
 
-    Ok(StatusCode::OK)
+    let todos: Vec<Todo> = query_as!(Todo, "SELECT * FROM todos ORDER BY id").fetch_all(&pool).await?;
+    let temp = Todos{ todos: todos };
+    let reply = temp.render().unwrap();
+
+    Ok(Html(reply))
 }
 
-async fn delete_todo(Path(id): Path<i32>, State(pool): State<PgPool>) -> Result<StatusCode, ApiError> {
+async fn delete_todo(Path(id): Path<i32>, State(pool): State<PgPool>) -> Result<Html<String>, ApiError> {
     // Delete based on id
     query!("DELETE FROM todos WHERE id = $1", id).execute(&pool).await?;
 
-    // send back result
-    Ok(StatusCode::OK)
+    let todos: Vec<Todo> = query_as!(Todo, "SELECT * FROM todos ORDER BY id").fetch_all(&pool).await?;
+    let temp = Todos{ todos: todos };
+    let reply = temp.render().unwrap();
+
+    Ok(Html(reply))
 }
